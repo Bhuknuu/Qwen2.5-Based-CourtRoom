@@ -51,7 +51,7 @@ class Orchestrator {
 
     public DebateSession debate(String proposition, boolean verbose) {
         DebateSession session = new DebateSession(proposition, maxRounds);
-        String line="_ + .".repeat(20);
+        String line="_+._".repeat(20);
         if (verbose) {
             System.out.println("\n" + line);
             System.out.println("Proposition : \"" + proposition + "\"");

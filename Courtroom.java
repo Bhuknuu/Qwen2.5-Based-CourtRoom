@@ -12,86 +12,135 @@ import java.util.Scanner;
 public class Courtroom {
 
     public static void main(String[] args) {
-        String proposition;
+        String statement;
         int rounds;
 
         Scanner scanner = new Scanner(System.in);
-        System.out.print("Enter proposition to debate: ");
-        proposition = scanner.nextLine().trim();
+        System.out.print("Enter statement to debate: ");
+        statement = scanner.nextLine().trim();
 
         System.out.print("Number of max rounds: ");
         try { rounds = Integer.parseInt(scanner.nextLine().trim()); }
         catch (NumberFormatException e) {rounds=3; /*default*/ }
 
-        if (proposition.isEmpty()) {
-            System.out.println("No Proposition found, Exiting...");
+        if (statement.isEmpty()) {
+            System.out.println("No Statement found, Exiting...");
             System.exit(1);
         }
 
         Orchestrator court = new Orchestrator(rounds);
-        DebateSession result = court.debate(proposition, true);
+        DebateSession result = court.debate(statement, true);
 
         System.out.println("\nDone ! | " + result.getCurrentRound() + " round(s) | " + result.getTranscript().size() + " total messages.");
     }
 }
 
 class Orchestrator {
-    private final Prosecutor prosecutor;
-    private final DefenseAttorney defense;
+    private final Critic critic;
+    private final For forSide;
     private final Judge judge;
     private final int maxRounds;
+    private final OllamaClient client;
 
-    public Orchestrator(int maxRounds) { //Constructor
-        OllamaClient client = new OllamaClient("qwen2.5");
-        this.prosecutor = new Prosecutor(client);
-        this.defense = new DefenseAttorney(client);
+    public Orchestrator(int maxRounds) {
+        this.client = new OllamaClient("qwen2.5");
+        this.critic = new Critic(client);
+        this.forSide = new For(client);
         this.judge = new Judge(client);
         this.maxRounds = maxRounds;
     }
 
-    public DebateSession debate(String proposition, boolean verbose) {
-        DebateSession session = new DebateSession(proposition, maxRounds);
-        String line="_+._".repeat(20);
+    public DebateSession debate(String statement, boolean verbose) {
+        DebateSession session = new DebateSession(statement, maxRounds);
+        String line = "_ + .".repeat(20);
+
+        // ── opening: clarify what FOR and AGAINST mean for this specific statement
+        String[] sides = clarifyStances(statement);
+        String forMeans     = sides[0];
+        String againstMeans = sides[1];
+
         if (verbose) {
             System.out.println("\n" + line);
-            System.out.println("Proposition : \"" + proposition + "\"");
-            System.out.println("MaxRounds  : " + maxRounds);
+            System.out.println("Statement : \"" + statement + "\"");
+            System.out.println("FOR       : " + forMeans);
+            System.out.println("AGAINST   : " + againstMeans);
+            System.out.println("MaxRounds : " + maxRounds);
             System.out.println(line);
         }
 
         for (int round = 1; round <= maxRounds; round++) {
             if (verbose) System.out.println("\nRound:" + round);
 
-            String pArg = prosecutor.argue(session);
-            session.addMessage(prosecutor.getName(), pArg);
-            if (verbose) System.out.println("\nProsecutor:\n" + pArg);
+            String cArg = critic.argue(session);
+            session.addMessage(critic.getName(), cArg);
+            if (verbose) System.out.println("\nAgainst:\n" + cArg);
 
-            String dArg = defense.argue(session);
-            session.addMessage(defense.getName(), dArg);
-            if (verbose) System.out.println("\nDefense:\n" + dArg);
+            String fArg = forSide.argue(session);
+            session.addMessage(forSide.getName(), fArg);
+            if (verbose) System.out.println("\nFor:\n" + fArg);
 
             if (verbose) System.out.println("\nJudge...");
-            String judgeOut = judge.argue(session);
 
-            if (verbose) {
-                System.out.println(">>> " + Judge.assessment(judgeOut));
-                System.out.println("Prosecution" + Judge.score(judgeOut, "ProsecutorScore") + " | Defense " + Judge.score(judgeOut, "DefenseScore"));
+            // judge picks exactly one winner for this round — no scores, just a name
+            String roundWinner = judge.pickRoundWinner(session);
+
+            if (roundWinner.equals("AGAINST")) {
+                session.addCriticPoint();
+            } else {
+                session.addForPoint();
             }
 
-            if (!Judge.needsRebuttal(judgeOut) || round == maxRounds) {
-                session.conclude(Judge.winner(judgeOut), Judge.verdict(judgeOut));
+            if (verbose) {
+                System.out.println("Round winner : " + roundWinner);
+                System.out.println("Score        : Against " + session.getCriticPoints()
+                                 + " — For " + session.getForPoints());
+            }
+
+            boolean finalRound  = (round == maxRounds);
+            boolean pointsGap   = Math.abs(session.getCriticPoints() - session.getForPoints()) == maxRounds;
+
+            // stop early only if one side has swept every round so far and it's decisive
+            if (finalRound || pointsGap) {
+                // final verdict: true/false on the statement + winner summary
+                String verdict = judge.finalVerdict(session);
+                String overallWinner = session.getCriticPoints() > session.getForPoints() ? "AGAINST" : "FOR";
+                session.conclude(overallWinner, verdict);
+
                 if (verbose) {
                     System.out.println("\n" + line);
-                    System.out.println("Verdict : " + session.getVerdictText());
-                    System.out.println("Winner  : " + session.getWinner());
+                    System.out.println("Final Score : Against " + session.getCriticPoints()
+                                     + " — For " + session.getForPoints());
+                    System.out.println("Verdict     : " + verdict);
+                    System.out.println("Winner      : " + overallWinner);
                     System.out.println(line);
                 }
-                // break;
+                break;
             } else {
-                if (verbose) System.out.println("Rebuttal : " + Judge.verdict(judgeOut));
                 session.nextRound();
             }
         }return session;
+    }
+
+    // one small call at the start — asks the model what FOR and AGAINST mean
+    // for this specific statement so the user knows what each side is arguing
+    private String[] clarifyStances(String statement) {
+        String system = "You clarify debate positions. Be brief and direct.";
+        String prompt = "For the statement: \"" + statement + "\"\n"
+                      + "Respond in EXACTLY this format, one line each, no extra text:\n"
+                      + "FOR: <what the FOR side is arguing in one short phrase>\n"
+                      + "AGAINST: <what the AGAINST side is arguing in one short phrase>";
+        try {
+            String response = client.chat(system, prompt);
+            String forMeans     = "agrees with the statement";
+            String againstMeans = "disagrees with the statement";
+            for (String l : response.split("\n")) {
+                if (l.startsWith("FOR:"))     forMeans     = l.substring(4).trim();
+                if (l.startsWith("AGAINST:")) againstMeans = l.substring(8).trim();
+            }
+            return new String[]{forMeans, againstMeans};
+        } catch (IOException e) {
+            return new String[]{"agrees with the statement", "disagrees with the statement"};
+        }
     }
 }
 
@@ -128,7 +177,7 @@ class Message {
 // ──────────────────────────────────────────────────────────────────────────────
 
 class DebateSession {
-    private final String proposition;
+    private final String statement;
     private final List<Message> transcript;
     private final int maxRounds;
     private int currentRound;
@@ -136,17 +185,26 @@ class DebateSession {
     private String winner;
     private String verdictText;
 
-    public DebateSession(String proposition, int maxRounds) {
-        this.proposition = proposition;
+    // integer scoreboard — no string parsing, just increment
+    private int criticPoints;
+    private int forPoints;
+
+    public DebateSession(String statement, int maxRounds) {
+        this.statement = statement;
         this.maxRounds = maxRounds;
         this.transcript = new ArrayList<>();
         this.currentRound = 1;
         this.concluded = false;
+        this.criticPoints = 0;
+        this.forPoints = 0;
     }
 
     public void addMessage(String speaker, String content) {
         transcript.add(new Message(speaker, content, currentRound));
     }
+
+    public void addCriticPoint(){criticPoints++;}
+    public void addForPoint(){forPoints++;}
 
     public void nextRound(){currentRound++;}
 
@@ -164,12 +222,22 @@ class DebateSession {
         return sb.toString().trim();
     }
 
-    public String getProposition(){return proposition;}
+    // builds only the messages from one side — used for verdict summary
+    public String buildSideTranscript(String speakerName) {
+        StringBuilder sb = new StringBuilder();
+        for (Message m : transcript)
+            if (m.getSpeaker().equals(speakerName)) sb.append(m.getContent()).append("\n\n");
+        return sb.toString().trim();
+    }
+
+    public String getStatement(){return statement;}
     public int getCurrentRound(){return currentRound;}
     public int getMaxRounds(){return maxRounds;}
     public boolean isConcluded(){return concluded;}
     public String getWinner(){return winner;}
     public String getVerdictText(){return verdictText;}
+    public int getCriticPoints(){return criticPoints;}
+    public int getForPoints(){return forPoints;}
     public List<Message> getTranscript(){return Collections.unmodifiableList(transcript);}
 }
 
@@ -214,7 +282,7 @@ class OllamaClient {
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(URL))
                 .timeout(Duration.ofSeconds(TIMEOUT))
-                .header("Content_Type", "application/json")
+                .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
 
@@ -266,134 +334,125 @@ class OllamaClient {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-//  PROSECUTOR
+//  CRITIC
 //  finds everything wrong with the idea.
 // ──────────────────────────────────────────────────────────────────────────────
 
-class Prosecutor implements Agent {
+class Critic implements Agent {
     private static final String PERSONA =
         """
-        You are the Prosecutor in a structured adversarial debate. 
-        Argue AGAINST the proposition. Expose its flaws, risks, and gaps.
-        Never concede. Counter what the Defense said directly.
-        4-6 sentences max. End with "\nPROSECUTION POINT: <core objection>". """;
+        You are the Critic in a structured adversarial debate.
+        Argue AGAINST the statement. Expose its flaws, risks, and gaps.
+        Never concede. Counter what For said directly.
+        4-6 sentences max.""";
 
     private final OllamaClient client;
-    public Prosecutor(OllamaClient client) { this.client = client; }
+    public Critic(OllamaClient client) { this.client = client; }
 
-    @Override 
-    public String getName(){return "Prosecutor"; }
-    
-    @Override 
+    @Override
+    public String getName(){return "Against"; }
+
+    @Override
     public String getSystemPrompt(){return PERSONA; }
 
     @Override
     public String argue(DebateSession s) {
-        String prompt = "Proposition: \"" + s.getProposition() + "\"\n\n" + "Transcript so far:\n" + s.buildTranscriptContext() + "\n\n";
+        String prompt = "Statement: \"" + s.getStatement() + "\"\n\n" + "Transcript so far:\n" + s.buildTranscriptContext() + "\n\n";
         try { return client.chat(PERSONA, prompt); }
-        catch (IOException e) { return "Prosecutor offline: " + e.getMessage(); }
+        catch (IOException e) { return "Against offline: " + e.getMessage(); }
     }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-//  DEFENSE ATTORNEY
+//  FOR
 //  finds the good in everything. the optimist.
 // ──────────────────────────────────────────────────────────────────────────────
 
-class DefenseAttorney implements Agent {
-
+class For implements Agent {
     private static final String PERSONA =
         """
-        You are the Defense Attorney in a structured adversarial debate.
-        Argue IN FAVOUR of the proposition. Defend it, justify it, show its merit.
-        Never concede. Directly counter what the Prosecutor said.
-        4-6 sentences max. End with "\nDEFENSE POINT: <strongest justification>".""";
+        You are For in a structured adversarial debate.
+        Argue IN FAVOUR of the statement. Defend it, justify it, show its merit.
+        Never concede. Directly counter what the Critic said.
+        4-6 sentences max.""";
 
     private final OllamaClient client;
-    public DefenseAttorney(OllamaClient client) {this.client = client; }
+    public For(OllamaClient client) {this.client = client; }
 
-    @Override 
-    public String getName(){ return "Defense Attorney"; }
-    
-    @Override 
+    @Override
+    public String getName(){ return "For"; }
+
+    @Override
     public String getSystemPrompt() {return PERSONA;}
 
     @Override
     public String argue(DebateSession s) {
-        String prompt = "Proposition: \"" + s.getProposition() + "\"\n\n" + "Transcript so far:\n" + s.buildTranscriptContext() + "\n\n";
+        String prompt = "Statement: \"" + s.getStatement() + "\"\n\n" + "Transcript so far:\n" + s.buildTranscriptContext() + "\n\n";
         try {return client.chat(PERSONA, prompt); }
-        catch (IOException e) {return "defense offline: " + e.getMessage(); }
+        catch (IOException e) {return "For offline: " + e.getMessage(); }
     }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  JUDGE
-//  reads the whole fight, scores both sides, decides if we need another round.
-//  strict output format so the orchestrator can parse it without doing regex.
+//  two jobs, two methods:
+//    pickRoundWinner  — reads this round's two arguments, returns "AGAINST" or "FOR"
+//    finalVerdict     — reads full transcript, returns true/false on the statement
+//                       + a summary of why the winning side won
 // ──────────────────────────────────────────────────────────────────────────────
 
-class Judge implements Agent {
-
-    private static final String PERSONA =
-        """
-        You are the Judge in a structured debate. Be objective. Respond in EXACTLY this format, no extra text:
-        ProsecutorScore: <1-10>
-        DefenseScore: <1-10>
-        NeedsRebuttal: <YES or NO>
-        Assessment: <one sentence>
-        Verdict: <final verdict if NO, or the unresolved question if YES>
-        Winner: <PROSECUTION, DEFENSE, DRAW, or PENDING>""";
+class Judge {
 
     private final OllamaClient client;
     public Judge(OllamaClient client) { this.client = client; }
 
-    @Override 
-    public String getName(){return "Judge";}
-    
-    @Override 
-    public String getSystemPrompt() {return PERSONA;}
-
-    @Override
-    public String argue(DebateSession s) {
-        boolean last = s.getCurrentRound() >= s.getMaxRounds();
-        String prompt = "Prosecutor: \"" + s.getProposition() + "\"\n\n"
-                      + "Transcript:\n" + s.buildTranscriptContext() + "\n\n"
-                      + "Round " + s.getCurrentRound() + "/" + s.getMaxRounds() + ". "
-                      + (last ? "Final round - verdict required. NeedsRebuttal must be NO." : "")
-                      + "\nEvaluate.";
-        try { return client.chat(PERSONA, prompt); }
-        catch (IOException e) {
-            return "Error in output File, Retry !";
+    // called once per round. returns exactly "AGAINST" or "FOR". nothing else needed.
+    public String pickRoundWinner(DebateSession s) {
+        String system =
+            """
+            You are the Judge in a structured debate. Read the latest round of arguments and decide who argued better.
+            Respond with EXACTLY one word: AGAINST or FOR. No punctuation, no explanation.""";
+        String prompt = "Statement: \"" + s.getStatement() + "\"\n\n"
+                      + "Full transcript:\n" + s.buildTranscriptContext() + "\n\n"
+                      + "Who won this round? Reply with one word only: AGAINST or FOR";
+        try {
+            String response = client.chat(system, prompt).trim().toUpperCase();
+            // if the model rambles, scan for the first valid keyword
+            if (response.contains("AGAINST")) return "AGAINST";
+            if (response.contains("FOR"))    return "FOR";
+            return "FOR"; // fallback — shouldn't happen often
+        } catch (IOException e) {
+            return "FOR"; // silent fallback, debate continues
         }
     }
 
-    static boolean needsRebuttal(String r) {
-        for (String l : r.split("\n"))
-            if (l.startsWith("NeedsRebuttal:")) return l.contains("YES");
-        return false;
-    }
-    static String verdict(String r) {
-        for (String l : r.split("\n"))
-            if (l.startsWith("Verdict:")) return l.substring(8).trim();
-        return "No Verdict";
-    }
-    static String winner(String r) {
-        for (String l : r.split("\n"))
-            if (l.startsWith("Winner:")) 
-                return l.substring(7).trim();
-        return "DRAW";
-    }
-    static String assessment(String r) {
-        for (String l : r.split("\n"))
-            if (l.startsWith("Assessment:")) 
-                return l.substring(11).trim();
-        return "";
-    }
-    static int score(String r, String tag) {
-        for (String l : r.split("\n"))
-            if (l.startsWith(tag))
-                try { return Integer.parseInt(l.substring(tag.length() + 1).trim()); }
-                catch (NumberFormatException ignored) { return 0; }
-        return 0;
+    // called once at the very end. returns the verdict as a plain sentence.
+    // format: "TRUE: <summary>" or "FALSE: <summary>"
+    // TRUE  = the statement holds after debate
+    // FALSE = the statement does not hold after debate
+    public String finalVerdict(DebateSession s) {
+        String winnerName  = s.getCriticPoints() > s.getForPoints() ? "Against" : "For";
+        String winnerSide  = s.getCriticPoints() > s.getForPoints() ? "AGAINST" : "FOR";
+        String winnerArgs  = s.buildSideTranscript(winnerName);
+
+        String system =
+            """
+            You are the Judge delivering a final verdict on a debated statement.
+            Respond in EXACTLY this format, one line only:
+            TRUE: <one sentence summary of why the statement holds, using the winning side's arguments>
+            or
+            FALSE: <one sentence summary of why the statement does not hold, using the winning side's arguments>
+            No extra text. The summary must reflect the actual arguments made.""";
+
+        String prompt = "Statement: \"" + s.getStatement() + "\"\n\n"
+                      + "The winning side was: " + winnerSide + "\n\n"
+                      + "Winning side's arguments across all rounds:\n" + winnerArgs + "\n\n"
+                      + "Final score: Against " + s.getCriticPoints() + " — For " + s.getForPoints() + "\n\n"
+                      + "Deliver the final verdict.";
+        try {
+            return client.chat(system, prompt).trim();
+        } catch (IOException e) {
+            return "Verdict unavailable: " + e.getMessage();
+        }
     }
 }
